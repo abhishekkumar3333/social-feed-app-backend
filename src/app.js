@@ -21,20 +21,16 @@ app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
-// Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/posts', postRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/notifications', notificationRoutes);
 
-// Dedicated Feed Endpoints
 app.get('/api/feed', protect, getFeed);
 app.get('/api/feed/explore', protect, getExploreFeed);
 
-// Admin Endpoints
 app.get('/api/admin/queue-stats', protect, getQueueStats);
 
-// Error Handling
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ message: err.message || 'Internal Server Error' });

@@ -1,7 +1,7 @@
 const Post = require('../models/Post');
 const FeedItem = require('../models/FeedItem');
 const Like = require('../models/Like');
-const Comment = require('../models/Comment');
+const Follow = require('../models/Follow');
 const { moderationQueue, notificationQueue } = require('../queues');
 
 // POST /api/posts - Create post
@@ -58,11 +58,13 @@ const getFeed = async (req, res) => {
     const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
     postObj.isLiked = !!like;
     
+    const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
+    
     // Compatibility fields for frontend
-    postObj.author = postObj.authorId; 
+    postObj.author = { ...postObj.authorId, isFollowing: !!isFollowing }; 
     postObj.image = postObj.mediaUrls[0] || null;
     postObj.likesCount = postObj.likeCount;
-    postObj.commentsCount = postObj.commentCount;
+    postObj.commentsCount = 0;
 
     return { ...item.toObject(), post: postObj };
   }));
@@ -81,10 +83,11 @@ const getExploreFeed = async (req, res) => {
     const postObj = p.toObject();
     const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
     postObj.isLiked = !!like;
-    postObj.author = postObj.authorId;
+    const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
+    postObj.author = { ...postObj.authorId, isFollowing: !!isFollowing };
     postObj.image = postObj.mediaUrls[0] || null;
     postObj.likesCount = postObj.likeCount;
-    postObj.commentsCount = postObj.commentCount;
+    postObj.commentsCount = 0;
     return postObj;
   }));
 
@@ -99,35 +102,15 @@ const getPostDetail = async (req, res) => {
   const postObj = post.toObject();
   const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
   postObj.isLiked = !!like;
-  postObj.author = postObj.authorId;
+  
+  const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
+  postObj.author = { ...postObj.authorId, isFollowing: !!isFollowing };
+  
   postObj.image = postObj.mediaUrls[0] || null;
   postObj.likesCount = postObj.likeCount;
-  postObj.commentsCount = postObj.commentCount;
+  postObj.commentsCount = 0;
 
-  const comments = await Comment.find({ postId: post._id })
-    .sort({ createdAt: 1 })
-    .populate('authorId', 'username displayName avatarUrl');
-
-  // Build a simple nested tree
-  const commentMap = {};
-  const tree = [];
-
-  comments.forEach(c => {
-    const obj = c.toObject();
-    obj.replies = [];
-    commentMap[obj._id] = obj;
-  });
-
-  comments.forEach(c => {
-    const obj = commentMap[c._id];
-    if (c.parentId) {
-      if (commentMap[c.parentId]) commentMap[c.parentId].replies.push(obj);
-    } else {
-      tree.push(obj);
-    }
-  });
-
-  res.json({ post: postObj, comments: tree });
+  res.json({ post: postObj, comments: [] });
 };
 
 // POST /api/posts/:id/like - Toggle like
@@ -161,33 +144,6 @@ const toggleLike = async (req, res) => {
   res.json({ message: 'Liked', likeCount: post.likeCount, isLiked: true });
 };
 
-// POST /api/posts/:id/comments - Add comment
-const addComment = async (req, res) => {
-  const { content, parentId } = req.body;
-  const post = await Post.findById(req.params.id);
-  if (!post) return res.status(404).json({ message: 'Post not found' });
-
-  const comment = await Comment.create({
-    authorId: req.user._id,
-    postId: post._id,
-    parentId: parentId || null,
-    content
-  });
-
-  post.commentCount += 1;
-  await post.save();
-
-  if (post.authorId.toString() !== req.user._id.toString()) {
-    await notificationQueue.add('comment-notif', {
-      recipientId: post.authorId,
-      actorId: req.user._id,
-      type: 'comment',
-      postId: post._id
-    });
-  }
-
-  res.status(201).json(comment);
-};
 
 // DELETE /api/posts/:id - Soft-delete
 const deletePost = async (req, res) => {
@@ -217,10 +173,11 @@ const getUserPosts = async (req, res) => {
     const postObj = p.toObject();
     const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
     postObj.isLiked = !!like;
-    postObj.author = postObj.authorId;
+    const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
+    postObj.author = { ...postObj.authorId, isFollowing: !!isFollowing };
     postObj.image = postObj.mediaUrls[0] || null;
     postObj.likesCount = postObj.likeCount;
-    postObj.commentsCount = postObj.commentCount;
+    postObj.commentsCount = 0;
     return postObj;
   }));
     
@@ -233,18 +190,6 @@ module.exports = {
   getExploreFeed,
   getPostDetail,
   toggleLike,
-  addComment,
-  deletePost,
-  getUserPosts
-};
-
-module.exports = {
-  createPost,
-  getFeed,
-  getExploreFeed,
-  getPostDetail,
-  toggleLike,
-  addComment,
   deletePost,
   getUserPosts
 };

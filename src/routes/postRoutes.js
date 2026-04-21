@@ -4,7 +4,6 @@ const {
   createPost,
   getPostDetail,
   toggleLike,
-  addComment,
   deletePost,
   getUserPosts
 } = require('../controllers/postController');
@@ -23,9 +22,7 @@ router.delete('/:id', protect, deletePost);
 // POST /api/posts/:id/like
 router.post('/:id/like', protect, toggleLike);
 
-// POST /api/posts/:id/comments
-router.post('/:id/comment', protect, addComment);
-router.post('/:id/comments', protect, addComment); // Support both naming styles
+
 
 // Profile specific posts
 router.get('/user/:id', protect, getUserPosts);
