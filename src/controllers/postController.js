@@ -54,6 +54,7 @@ const getFeed = async (req, res) => {
   const enrichedFeed = await Promise.all(feedItems.map(async (item) => {
     if (!item.postId) return null;
     const postObj = item.postId.toObject();
+    if (!postObj.authorId) return null;
     
     const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
     postObj.isLiked = !!like;
@@ -69,7 +70,32 @@ const getFeed = async (req, res) => {
     return { ...item.toObject(), post: postObj };
   }));
 
-  res.json(enrichedFeed.filter(f => f !== null));
+  let pendingFeedItems = [];
+  if (lastScore === null && lastId === null) {
+    const pendingPosts = await Post.find({
+      authorId: req.user._id,
+      status: { $in: ['pending', 'rejected'] }
+    })
+    .sort({ createdAt: -1 })
+    .populate('authorId', 'username displayName avatarUrl');
+
+    pendingFeedItems = pendingPosts.map(p => {
+      const postObj = p.toObject();
+      postObj.isLiked = false; // Just created, assume not liked
+      postObj.author = { ...postObj.authorId, isFollowing: false }; // Own post
+      postObj.image = postObj.mediaUrls[0] || null;
+      postObj.likesCount = postObj.likeCount;
+      postObj.commentsCount = 0;
+
+      return {
+        _id: p._id, // Use post ID as fake feedItem ID
+        score: Infinity,
+        post: postObj
+      };
+    });
+  }
+
+  res.json([...pendingFeedItems, ...enrichedFeed.filter(f => f !== null)]);
 };
 
 // GET /api/feed/explore - Top posts globally
@@ -81,6 +107,7 @@ const getExploreFeed = async (req, res) => {
 
   const enriched = await Promise.all(posts.map(async (p) => {
     const postObj = p.toObject();
+    if (!postObj.authorId) return null;
     const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
     postObj.isLiked = !!like;
     const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
@@ -91,7 +118,7 @@ const getExploreFeed = async (req, res) => {
     return postObj;
   }));
 
-  res.json(enriched);
+  res.json(enriched.filter(p => p !== null));
 };
 
 // GET /api/posts/:id - Post detail with nested comments
@@ -100,6 +127,7 @@ const getPostDetail = async (req, res) => {
   if (!post) return res.status(404).json({ message: 'Post not found' });
 
   const postObj = post.toObject();
+  if (!postObj.authorId) return res.status(404).json({ message: 'Post author not found' });
   const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
   postObj.isLiked = !!like;
   
@@ -165,12 +193,19 @@ const deletePost = async (req, res) => {
 
 // Internal for Profile
 const getUserPosts = async (req, res) => {
-  const posts = await Post.find({ authorId: req.params.id, status: 'approved' })
+  let query = { authorId: req.params.id, status: 'approved' };
+  
+  if (req.user._id.toString() === req.params.id) {
+    query = { authorId: req.params.id, status: { $in: ['approved', 'pending', 'rejected'] } };
+  }
+
+  const posts = await Post.find(query)
     .sort({ createdAt: -1 })
     .populate('authorId', 'username displayName avatarUrl');
   
   const enriched = await Promise.all(posts.map(async (p) => {
     const postObj = p.toObject();
+    if (!postObj.authorId) return null;
     const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
     postObj.isLiked = !!like;
     const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
@@ -181,7 +216,7 @@ const getUserPosts = async (req, res) => {
     return postObj;
   }));
     
-  res.json(enriched);
+  res.json(enriched.filter(p => p !== null));
 };
 
 module.exports = {
