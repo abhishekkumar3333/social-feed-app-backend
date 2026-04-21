@@ -5,7 +5,8 @@ const {
   getPostDetail,
   toggleLike,
   deletePost,
-  getUserPosts
+  getUserPosts,
+  addComment
 } = require('../controllers/postController');
 const { protect } = require('../middlewares/auth');
 const upload = require('../middlewares/upload');
@@ -22,8 +23,9 @@ router.delete('/:id', protect, deletePost);
 // POST /api/posts/:id/like
 router.post('/:id/like', protect, toggleLike);
 
-
-
+// POST /api/posts/:id/comment
+router.post('/:id/comment', protect, addComment);
+router.post('/:id/comments', protect, addComment);
 // Profile specific posts
 router.get('/user/:id', protect, getUserPosts);
 
