@@ -225,7 +225,7 @@ const addComment = async (req, res) => {
 };
 
 
-// DELETE /api/posts/:id - Soft-delete
+// DELETE /api/posts/:id - Hard-delete
 const deletePost = async (req, res) => {
   const post = await Post.findById(req.params.id);
   if (!post) return res.status(404).json({ message: 'Post not found' });
@@ -234,13 +234,13 @@ const deletePost = async (req, res) => {
     return res.status(403).json({ message: 'Not authorized' });
   }
 
-  // Soft delete by clearing content and removing from feed
-  post.status = 'rejected'; // Or flagged
-  await post.save();
-
+  // Hard delete post and associated data
+  await Post.deleteOne({ _id: post._id });
   await FeedItem.deleteMany({ postId: post._id });
+  await Like.deleteMany({ postId: post._id });
+  await Comment.deleteMany({ postId: post._id });
 
-  res.json({ message: 'Post removed' });
+  res.json({ message: 'Post completely removed' });
 };
 
 // Internal for Profile
