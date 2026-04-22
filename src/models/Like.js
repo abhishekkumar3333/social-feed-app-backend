@@ -15,7 +15,6 @@ const likeSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// Unique compound index so a user can't like a post twice
 likeSchema.index({ userId: 1, postId: 1 }, { unique: true });
 
 module.exports = mongoose.model('Like', likeSchema);

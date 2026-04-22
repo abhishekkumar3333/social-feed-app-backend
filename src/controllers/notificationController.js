@@ -10,17 +10,15 @@ const getNotifications = async (req, res) => {
     .populate('actorId', 'username displayName avatarUrl')
     .populate('postId', 'content');
 
-  const unreadCount = await Notification.countDocuments({ 
-    recipientId: req.user._id, 
-    read: false 
+  const unreadCount = await Notification.countDocuments({
+    recipientId: req.user._id,
+    read: false
   });
 
-  // Set unread count in response header as per requirements
   res.setHeader('X-Unread-Count', unreadCount);
   res.json(notifications);
 };
 
-// PUT /api/notifications/:id/read - Mark single
 const markAsRead = async (req, res) => {
   const notification = await Notification.findById(req.params.id);
 
@@ -34,7 +32,6 @@ const markAsRead = async (req, res) => {
   res.json(notification);
 };
 
-// PATCH /api/notifications/read - Mark all as read
 const markAllAsRead = async (req, res) => {
   await Notification.updateMany(
     { recipientId: req.user._id, read: false },

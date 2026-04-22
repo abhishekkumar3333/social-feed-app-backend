@@ -1,13 +1,23 @@
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 
-const generateAccessToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '15m' });
-};
+const BCRYPT_PATTERN = /^\$2[aby]\$/;
 
-const generateRefreshToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
-};
+const generateAccessToken = (id) =>
+  jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '15m' });
+
+const generateRefreshToken = (id) =>
+  jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
+
+const buildUserPayload = (user, accessToken, refreshToken) => ({
+  _id: user._id,
+  username: user.username,
+  displayName: user.displayName,
+  avatarUrl: user.avatarUrl,
+  role: user.role,
+  accessToken,
+  refreshToken,
+});
 
 const register = async (req, res) => {
   const { username, displayName, email, password } = req.body;
@@ -15,34 +25,18 @@ const register = async (req, res) => {
   const existingUser = await User.findOne({ $or: [{ email }, { username }] }).select('+password');
 
   if (existingUser) {
-    // If the password is NOT a valid bcrypt hash it means the document was
-    // created in a broken state (e.g. plain-text seed, failed migration).
-    // Clean it up and let the registration proceed so the user isn't locked out.
-    const isBcryptHash = /^\$2[aby]\$/.test(existingUser.password || '');
-    if (!isBcryptHash) {
-      await existingUser.deleteOne();
-    } else {
+    if (BCRYPT_PATTERN.test(existingUser.password || '')) {
       return res.status(400).json({ message: 'User already exists' });
     }
+    await existingUser.deleteOne();
   }
 
   try {
     const user = await User.create({ username, displayName, email, password });
-
     const accessToken = generateAccessToken(user._id);
     const refreshToken = generateRefreshToken(user._id);
-
-    return res.status(201).json({
-      _id: user._id,
-      username: user.username,
-      displayName: user.displayName,
-      avatarUrl: user.avatarUrl,
-      role: user.role,
-      accessToken,
-      refreshToken
-    });
+    return res.status(201).json(buildUserPayload(user, accessToken, refreshToken));
   } catch (err) {
-    // Handle race-condition duplicate key (E11000)
     if (err.code === 11000) {
       return res.status(400).json({ message: 'User already exists' });
     }
@@ -54,22 +48,13 @@ const login = async (req, res) => {
   const { email, password } = req.body;
   const user = await User.findOne({ email }).select('+password');
 
-  if (user && (await user.matchPassword(password))) {
-    const accessToken = generateAccessToken(user._id);
-    const refreshToken = generateRefreshToken(user._id);
-
-    res.json({
-      _id: user._id,
-      username: user.username,
-      displayName: user.displayName,
-      avatarUrl: user.avatarUrl,
-      role: user.role,
-      accessToken,
-      refreshToken
-    });
-  } else {
-    res.status(401).json({ message: 'Invalid email or password' });
+  if (!user || !(await user.matchPassword(password))) {
+    return res.status(401).json({ message: 'Invalid email or password' });
   }
+
+  const accessToken = generateAccessToken(user._id);
+  const refreshToken = generateRefreshToken(user._id);
+  res.json(buildUserPayload(user, accessToken, refreshToken));
 };
 
 const refresh = async (req, res) => {
@@ -81,11 +66,11 @@ const refresh = async (req, res) => {
     const user = await User.findById(decoded.id);
     if (!user) return res.status(401).json({ message: 'User not found' });
 
-    const newAccessToken = generateAccessToken(user._id);
-    const newRefreshToken = generateRefreshToken(user._id);
-
-    res.json({ accessToken: newAccessToken, refreshToken: newRefreshToken });
-  } catch (err) {
+    res.json({
+      accessToken: generateAccessToken(user._id),
+      refreshToken: generateRefreshToken(user._id),
+    });
+  } catch {
     res.status(403).json({ message: 'Invalid refresh token' });
   }
 };

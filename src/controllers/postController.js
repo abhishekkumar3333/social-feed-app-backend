@@ -5,7 +5,21 @@ const Follow = require('../models/Follow');
 const Comment = require('../models/Comment');
 const { moderationQueue, notificationQueue } = require('../queues');
 
-// POST /api/posts - Create post
+const enrichPost = async (postObj, currentUserId) => {
+  const [like, follow] = await Promise.all([
+    Like.findOne({ userId: currentUserId, postId: postObj._id }),
+    Follow.findOne({ followerId: currentUserId, followeeId: postObj.authorId._id }),
+  ]);
+
+  postObj.isLiked = !!like;
+  postObj.author = { ...postObj.authorId, isFollowing: !!follow };
+  postObj.image = postObj.mediaUrls[0] || null;
+  postObj.likesCount = postObj.likeCount;
+  postObj.commentsCount = postObj.commentsCount ?? 0;
+
+  return postObj;
+};
+
 const createPost = async (req, res) => {
   const { content } = req.body;
   const mediaUrls = req.file ? [`/uploads/${req.file.filename}`] : [];
@@ -14,149 +28,112 @@ const createPost = async (req, res) => {
     return res.status(400).json({ message: 'Content or media is required' });
   }
 
-  const post = await Post.create({
-    authorId: req.user._id,
-    content,
-    mediaUrls,
-    status: 'pending',
-  });
-
+  const post = await Post.create({ authorId: req.user._id, content, mediaUrls, status: 'pending' });
   await moderationQueue.add(`mod-${post._id}`, { postId: post._id });
 
-  res.status(202).json({
-    message: 'Post submitted and under review',
-    post,
-  });
+  res.status(202).json({ message: 'Post submitted and under review', post });
 };
 
-// GET /api/feed - Paginated ranked feed
 const getFeed = async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
   const lastScore = req.query.lastScore ? parseFloat(req.query.lastScore) : null;
   const lastId = req.query.lastId || null;
+  const isFirstPage = lastScore === null && lastId === null;
 
   let query = { userId: req.user._id };
-
   if (lastScore !== null && lastId !== null) {
     query.$or = [
       { score: { $lt: lastScore } },
-      { score: lastScore, _id: { $lt: lastId } }
+      { score: lastScore, _id: { $lt: lastId } },
     ];
   }
 
   const feedItems = await FeedItem.find(query)
     .sort({ score: -1, _id: -1 })
     .limit(limit)
-    .populate({
-      path: 'postId',
-      populate: { path: 'authorId', select: 'username displayName avatarUrl' }
-    });
+    .populate({ path: 'postId', populate: { path: 'authorId', select: 'username displayName avatarUrl' } });
 
-  const enrichedFeed = await Promise.all(feedItems.map(async (item) => {
-    if (!item.postId) return null;
-    const postObj = item.postId.toObject();
-    if (!postObj.authorId) return null;
-
-    const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
-    postObj.isLiked = !!like;
-
-    const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
-
-    // Compatibility fields for frontend
-    postObj.author = { ...postObj.authorId, isFollowing: !!isFollowing };
-    postObj.image = postObj.mediaUrls[0] || null;
-    postObj.likesCount = postObj.likeCount;
-    postObj.commentsCount = 0;
-
-    return { ...item.toObject(), post: postObj };
-  }));
+  const enrichedFeed = (
+    await Promise.all(
+      feedItems.map(async (item) => {
+        if (!item.postId) return null;
+        const postObj = item.postId.toObject();
+        if (!postObj.authorId) return null;
+        return { ...item.toObject(), post: await enrichPost(postObj, req.user._id) };
+      })
+    )
+  ).filter(Boolean);
 
   let pendingFeedItems = [];
-  if (lastScore === null && lastId === null) {
+  if (isFirstPage) {
     const pendingPosts = await Post.find({
       authorId: req.user._id,
-      status: { $in: ['pending', 'rejected'] }
+      status: { $in: ['pending', 'rejected'] },
     })
       .sort({ createdAt: -1 })
       .populate('authorId', 'username displayName avatarUrl');
 
-    pendingFeedItems = pendingPosts.map(p => {
+    pendingFeedItems = pendingPosts.map((p) => {
       const postObj = p.toObject();
-      postObj.isLiked = false; // Just created, assume not liked
-      postObj.author = { ...postObj.authorId, isFollowing: false }; // Own post
+      postObj.isLiked = false;
+      postObj.author = { ...postObj.authorId, isFollowing: false };
       postObj.image = postObj.mediaUrls[0] || null;
       postObj.likesCount = postObj.likeCount;
       postObj.commentsCount = 0;
-
-      return {
-        _id: p._id, // Use post ID as fake feedItem ID
-        score: Infinity,
-        post: postObj
-      };
+      return { _id: p._id, score: Infinity, post: postObj };
     });
   }
 
-  res.json([...pendingFeedItems, ...enrichedFeed.filter(f => f !== null)]);
+  res.json([...pendingFeedItems, ...enrichedFeed]);
 };
 
-// GET /api/feed/explore - Top posts globally
 const getExploreFeed = async (req, res) => {
   const posts = await Post.find({ status: 'approved' })
     .sort({ moderationScore: -1, createdAt: -1 })
     .limit(20)
     .populate('authorId', 'username displayName avatarUrl');
 
-  const enriched = await Promise.all(posts.map(async (p) => {
-    const postObj = p.toObject();
-    if (!postObj.authorId) return null;
-    const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
-    postObj.isLiked = !!like;
-    const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
-    postObj.author = { ...postObj.authorId, isFollowing: !!isFollowing };
-    postObj.image = postObj.mediaUrls[0] || null;
-    postObj.likesCount = postObj.likeCount;
-    postObj.commentsCount = 0;
-    return postObj;
-  }));
+  const enriched = (
+    await Promise.all(
+      posts.map(async (p) => {
+        const postObj = p.toObject();
+        if (!postObj.authorId) return null;
+        postObj.commentsCount = 0;
+        return enrichPost(postObj, req.user._id);
+      })
+    )
+  ).filter(Boolean);
 
-  res.json(enriched.filter(p => p !== null));
+  res.json(enriched);
 };
 
-// GET /api/posts/:id - Post detail with nested comments
 const getPostDetail = async (req, res) => {
   const post = await Post.findById(req.params.id).populate('authorId', 'username displayName avatarUrl');
   if (!post) return res.status(404).json({ message: 'Post not found' });
 
   const postObj = post.toObject();
   if (!postObj.authorId) return res.status(404).json({ message: 'Post author not found' });
-  const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
-  postObj.isLiked = !!like;
 
-  const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
-  postObj.author = { ...postObj.authorId, isFollowing: !!isFollowing };
-
-  postObj.image = postObj.mediaUrls[0] || null;
-  postObj.likesCount = postObj.likeCount;
   postObj.commentsCount = postObj.commentCount;
+  await enrichPost(postObj, req.user._id);
 
   const comments = await Comment.find({ postId: post._id })
     .sort({ createdAt: 1 })
     .populate('authorId', 'username displayName avatarUrl');
 
-  // Build a simple nested tree
   const commentMap = {};
   const tree = [];
 
-  comments.forEach(c => {
+  comments.forEach((c) => {
     const obj = c.toObject();
     obj.replies = [];
     commentMap[obj._id] = obj;
   });
 
-  comments.forEach(c => {
+  comments.forEach((c) => {
     const obj = commentMap[c._id];
-    if (c.parentId) {
-      if (commentMap[c.parentId]) commentMap[c.parentId].replies.push(obj);
+    if (c.parentId && commentMap[c.parentId]) {
+      commentMap[c.parentId].replies.push(obj);
     } else {
       tree.push(obj);
     }
@@ -165,17 +142,16 @@ const getPostDetail = async (req, res) => {
   res.json({ post: postObj, comments: tree });
 };
 
-// POST /api/posts/:id/like - Toggle like
 const toggleLike = async (req, res) => {
   try {
     const postId = req.params.id;
     const post = await Post.findById(postId);
     if (!post) return res.status(404).json({ message: 'Post not found' });
 
-    const alreadyLiked = await Like.findOne({ userId: req.user._id, postId });
+    const existing = await Like.findOne({ userId: req.user._id, postId });
 
-    if (alreadyLiked) {
-      await Like.deleteOne({ _id: alreadyLiked._id });
+    if (existing) {
+      await Like.deleteOne({ _id: existing._id });
       post.likeCount = Math.max(0, post.likeCount - 1);
       await post.save();
       return res.json({ message: 'Unliked', likeCount: post.likeCount, isLiked: false });
@@ -190,21 +166,19 @@ const toggleLike = async (req, res) => {
         recipientId: post.authorId,
         actorId: req.user._id,
         type: 'like',
-        postId: post._id
+        postId: post._id,
       });
     }
 
     res.json({ message: 'Liked', likeCount: post.likeCount, isLiked: true });
   } catch (err) {
-    // Handle MongoDB duplicate key error (E11000) from a stale index
     if (err.code === 11000) {
       return res.status(409).json({ message: 'You have already liked this post.' });
     }
-    throw err; // Re-throw anything else to the global error handler
+    throw err;
   }
 };
 
-// POST /api/posts/:id/comments - Add comment
 const addComment = async (req, res) => {
   const { content, parentId } = req.body;
   const post = await Post.findById(req.params.id);
@@ -214,7 +188,7 @@ const addComment = async (req, res) => {
     authorId: req.user._id,
     postId: post._id,
     parentId: parentId || null,
-    content
+    content,
   });
 
   post.commentCount += 1;
@@ -225,56 +199,54 @@ const addComment = async (req, res) => {
       recipientId: post.authorId,
       actorId: req.user._id,
       type: 'comment',
-      postId: post._id
+      postId: post._id,
     });
   }
 
   res.status(201).json(comment);
 };
 
-
-// DELETE /api/posts/:id - Hard-delete
 const deletePost = async (req, res) => {
   const post = await Post.findById(req.params.id);
   if (!post) return res.status(404).json({ message: 'Post not found' });
 
-  if (post.authorId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+  const isOwner = post.authorId.toString() === req.user._id.toString();
+  if (!isOwner && req.user.role !== 'admin') {
     return res.status(403).json({ message: 'Not authorized' });
   }
 
-  await Post.deleteOne({ _id: post._id });
-  await FeedItem.deleteMany({ postId: post._id });
-  await Like.deleteMany({ postId: post._id });
-  await Comment.deleteMany({ postId: post._id });
+  await Promise.all([
+    Post.deleteOne({ _id: post._id }),
+    FeedItem.deleteMany({ postId: post._id }),
+    Like.deleteMany({ postId: post._id }),
+    Comment.deleteMany({ postId: post._id }),
+  ]);
 
   res.json({ message: 'Post completely removed' });
 };
 
 const getUserPosts = async (req, res) => {
-  let query = { authorId: req.params.id, status: 'approved' };
+  const isOwnProfile = req.user._id.toString() === req.params.id;
+  const statusFilter = isOwnProfile
+    ? { $in: ['approved', 'pending', 'rejected'] }
+    : 'approved';
 
-  if (req.user._id.toString() === req.params.id) {
-    query = { authorId: req.params.id, status: { $in: ['approved', 'pending', 'rejected'] } };
-  }
-
-  const posts = await Post.find(query)
+  const posts = await Post.find({ authorId: req.params.id, status: statusFilter })
     .sort({ createdAt: -1 })
     .populate('authorId', 'username displayName avatarUrl');
 
-  const enriched = await Promise.all(posts.map(async (p) => {
-    const postObj = p.toObject();
-    if (!postObj.authorId) return null;
-    const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
-    postObj.isLiked = !!like;
-    const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
-    postObj.author = { ...postObj.authorId, isFollowing: !!isFollowing };
-    postObj.image = postObj.mediaUrls[0] || null;
-    postObj.likesCount = postObj.likeCount;
-    postObj.commentsCount = 0;
-    return postObj;
-  }));
+  const enriched = (
+    await Promise.all(
+      posts.map(async (p) => {
+        const postObj = p.toObject();
+        if (!postObj.authorId) return null;
+        postObj.commentsCount = 0;
+        return enrichPost(postObj, req.user._id);
+      })
+    )
+  ).filter(Boolean);
 
-  res.json(enriched.filter(p => p !== null));
+  res.json(enriched);
 };
 
 module.exports = {
@@ -285,5 +257,5 @@ module.exports = {
   toggleLike,
   addComment,
   deletePost,
-  getUserPosts
+  getUserPosts,
 };
