@@ -56,14 +56,14 @@ const getFeed = async (req, res) => {
     if (!item.postId) return null;
     const postObj = item.postId.toObject();
     if (!postObj.authorId) return null;
-    
+
     const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
     postObj.isLiked = !!like;
-    
+
     const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
-    
+
     // Compatibility fields for frontend
-    postObj.author = { ...postObj.authorId, isFollowing: !!isFollowing }; 
+    postObj.author = { ...postObj.authorId, isFollowing: !!isFollowing };
     postObj.image = postObj.mediaUrls[0] || null;
     postObj.likesCount = postObj.likeCount;
     postObj.commentsCount = 0;
@@ -77,8 +77,8 @@ const getFeed = async (req, res) => {
       authorId: req.user._id,
       status: { $in: ['pending', 'rejected'] }
     })
-    .sort({ createdAt: -1 })
-    .populate('authorId', 'username displayName avatarUrl');
+      .sort({ createdAt: -1 })
+      .populate('authorId', 'username displayName avatarUrl');
 
     pendingFeedItems = pendingPosts.map(p => {
       const postObj = p.toObject();
@@ -131,10 +131,10 @@ const getPostDetail = async (req, res) => {
   if (!postObj.authorId) return res.status(404).json({ message: 'Post author not found' });
   const like = await Like.findOne({ userId: req.user._id, postId: postObj._id });
   postObj.isLiked = !!like;
-  
+
   const isFollowing = await Follow.findOne({ followerId: req.user._id, followeeId: postObj.authorId._id });
   postObj.author = { ...postObj.authorId, isFollowing: !!isFollowing };
-  
+
   postObj.image = postObj.mediaUrls[0] || null;
   postObj.likesCount = postObj.likeCount;
   postObj.commentsCount = postObj.commentCount;
@@ -167,33 +167,41 @@ const getPostDetail = async (req, res) => {
 
 // POST /api/posts/:id/like - Toggle like
 const toggleLike = async (req, res) => {
-  const postId = req.params.id;
-  const post = await Post.findById(postId);
-  if (!post) return res.status(404).json({ message: 'Post not found' });
+  try {
+    const postId = req.params.id;
+    const post = await Post.findById(postId);
+    if (!post) return res.status(404).json({ message: 'Post not found' });
 
-  const alreadyLiked = await Like.findOne({ userId: req.user._id, postId });
+    const alreadyLiked = await Like.findOne({ userId: req.user._id, postId });
 
-  if (alreadyLiked) {
-    await Like.deleteOne({ _id: alreadyLiked._id });
-    post.likeCount = Math.max(0, post.likeCount - 1);
+    if (alreadyLiked) {
+      await Like.deleteOne({ _id: alreadyLiked._id });
+      post.likeCount = Math.max(0, post.likeCount - 1);
+      await post.save();
+      return res.json({ message: 'Unliked', likeCount: post.likeCount, isLiked: false });
+    }
+
+    await Like.create({ userId: req.user._id, postId });
+    post.likeCount += 1;
     await post.save();
-    return res.json({ message: 'Unliked', likeCount: post.likeCount, isLiked: false });
+
+    if (post.authorId.toString() !== req.user._id.toString()) {
+      await notificationQueue.add('like-notif', {
+        recipientId: post.authorId,
+        actorId: req.user._id,
+        type: 'like',
+        postId: post._id
+      });
+    }
+
+    res.json({ message: 'Liked', likeCount: post.likeCount, isLiked: true });
+  } catch (err) {
+    // Handle MongoDB duplicate key error (E11000) from a stale index
+    if (err.code === 11000) {
+      return res.status(409).json({ message: 'You have already liked this post.' });
+    }
+    throw err; // Re-throw anything else to the global error handler
   }
-
-  await Like.create({ userId: req.user._id, postId });
-  post.likeCount += 1;
-  await post.save();
-
-  if (post.authorId.toString() !== req.user._id.toString()) {
-    await notificationQueue.add('like-notif', {
-      recipientId: post.authorId,
-      actorId: req.user._id,
-      type: 'like',
-      postId: post._id
-    });
-  }
-
-  res.json({ message: 'Liked', likeCount: post.likeCount, isLiked: true });
 };
 
 // POST /api/posts/:id/comments - Add comment
@@ -234,7 +242,6 @@ const deletePost = async (req, res) => {
     return res.status(403).json({ message: 'Not authorized' });
   }
 
-  // Hard delete post and associated data
   await Post.deleteOne({ _id: post._id });
   await FeedItem.deleteMany({ postId: post._id });
   await Like.deleteMany({ postId: post._id });
@@ -243,10 +250,9 @@ const deletePost = async (req, res) => {
   res.json({ message: 'Post completely removed' });
 };
 
-// Internal for Profile
 const getUserPosts = async (req, res) => {
   let query = { authorId: req.params.id, status: 'approved' };
-  
+
   if (req.user._id.toString() === req.params.id) {
     query = { authorId: req.params.id, status: { $in: ['approved', 'pending', 'rejected'] } };
   }
@@ -254,7 +260,7 @@ const getUserPosts = async (req, res) => {
   const posts = await Post.find(query)
     .sort({ createdAt: -1 })
     .populate('authorId', 'username displayName avatarUrl');
-  
+
   const enriched = await Promise.all(posts.map(async (p) => {
     const postObj = p.toObject();
     if (!postObj.authorId) return null;
@@ -267,7 +273,7 @@ const getUserPosts = async (req, res) => {
     postObj.commentsCount = 0;
     return postObj;
   }));
-    
+
   res.json(enriched.filter(p => p !== null));
 };
 

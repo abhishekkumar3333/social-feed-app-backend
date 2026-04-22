@@ -12,23 +12,42 @@ const generateRefreshToken = (id) => {
 const register = async (req, res) => {
   const { username, displayName, email, password } = req.body;
 
-  const userExists = await User.findOne({ $or: [{ email }, { username }] });
-  if (userExists) return res.status(400).json({ message: 'User already exists' });
+  const existingUser = await User.findOne({ $or: [{ email }, { username }] }).select('+password');
 
-  const user = await User.create({ username, displayName, email, password });
+  if (existingUser) {
+    // If the password is NOT a valid bcrypt hash it means the document was
+    // created in a broken state (e.g. plain-text seed, failed migration).
+    // Clean it up and let the registration proceed so the user isn't locked out.
+    const isBcryptHash = /^\$2[aby]\$/.test(existingUser.password || '');
+    if (!isBcryptHash) {
+      await existingUser.deleteOne();
+    } else {
+      return res.status(400).json({ message: 'User already exists' });
+    }
+  }
 
-  const accessToken = generateAccessToken(user._id);
-  const refreshToken = generateRefreshToken(user._id);
+  try {
+    const user = await User.create({ username, displayName, email, password });
 
-  res.status(201).json({
-    _id: user._id,
-    username: user.username,
-    displayName: user.displayName,
-    avatarUrl: user.avatarUrl,
-    role: user.role,
-    accessToken,
-    refreshToken
-  });
+    const accessToken = generateAccessToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+
+    return res.status(201).json({
+      _id: user._id,
+      username: user.username,
+      displayName: user.displayName,
+      avatarUrl: user.avatarUrl,
+      role: user.role,
+      accessToken,
+      refreshToken
+    });
+  } catch (err) {
+    // Handle race-condition duplicate key (E11000)
+    if (err.code === 11000) {
+      return res.status(400).json({ message: 'User already exists' });
+    }
+    throw err;
+  }
 };
 
 const login = async (req, res) => {
